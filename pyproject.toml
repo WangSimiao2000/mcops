@@ -1,6 +1,6 @@
 [project]
 name = "mcops"
-version = "0.1.0"
+version = "0.1.1"
 description = "自托管 Minecraft（Fabric）服务器的一体化运维平台：Web 面板、备份回退、升级、安全审计、QQ 机器人"
 authors = [{ name = "WangSimiao2000" }]
 readme = "README.md"

@@ -2,8 +2,9 @@
 # 在开发机生成离线安装包：bash deploy/make-bundle.sh <输出目录>
 # 服务器访问 GitHub / PyPI 很慢，所以依赖在开发机按 uv.lock 的哈希下载好再带过去。
 set -euo pipefail
-cd "$(dirname "$0")/.."
 OUT="${1:?用法：make-bundle.sh <输出目录> [--tar]}"
+case "$OUT" in /*) ;; *) OUT="$PWD/$OUT" ;; esac   # 相对路径按调用时的目录算
+cd "$(dirname "$0")/.."
 TAR="${2:-}"
 # 找 uv：PATH → ~/.local/bin → Kiro Crew 自带的（开发机上 agent 用的就是它）
 UV="${UV:-$(command -v uv || true)}"
