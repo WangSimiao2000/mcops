@@ -1,0 +1,25 @@
+# 机密与运行时数据：一律不入库
+*.local.yaml
+config.yaml
+.env
+*.env
+secrets/
+data/
+*.db
+*.sqlite*
+*.log
+backups/
+# Python / Node
+.venv/
+__pycache__/
+*.pyc
+node_modules/
+dist/
+.pytest_cache/
+.ruff_cache/
+
+# 本地 agent 工具目录
+.kiro/
+
+# 本地开发产物（测试服、机密、数据库）
+dev/.local/

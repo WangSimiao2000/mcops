@@ -1,0 +1,25 @@
+# 本地开发配置：先运行 `uv run python dev/setup_server.py`
+data_dir: .local/data
+secrets_file: .local/secrets.yaml
+log_level: INFO
+
+server:
+  backend: subprocess
+  game_dir: .local/server
+  jar: "fabric-server-mc.*.jar"
+  java_opts: ["-Xms1G", "-Xmx2G"]
+  port: 25566
+  rcon_host: 127.0.0.1
+  rcon_port: 25576
+  start_ready_timeout_s: 300   # 首次启动要从 Mojang 下载服务端与库
+
+api:
+  host: 127.0.0.1
+  port: 8766              # 开发用 8766，避免和连生产的 ssh -L 8765 隧道冲突
+  static_dir: ../web/dist
+  allowed_origins: ["http://127.0.0.1:5173", "http://localhost:5173"]  # vite dev server
+
+ops:
+  restart_time: null      # 本地开发不自动重启；用面板/API 手动触发
+  warn_minutes: 1
+  backup_dir: .local/backups

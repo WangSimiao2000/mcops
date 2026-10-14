@@ -1,0 +1,75 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 卡片内滚动区（lib/scroll.ts）：表头吸顶，背景跟随卡片底色，滚动时不透出下面的行。 */
+@layer components {
+  .scroll-box thead th {
+    @apply sticky top-0 z-[1] bg-white dark:bg-slate-900;
+  }
+  .scroll-box:focus-visible {
+    @apply outline-none ring-2 ring-brand/40;
+  }
+}
+
+:root {
+  color-scheme: light dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-slate-50 text-slate-900 antialiased;
+}
+
+.dark body {
+  @apply bg-slate-950 text-slate-100;
+}
+
+/* Visible keyboard focus for accessibility. */
+:focus-visible {
+  @apply outline-none ring-2 ring-brand ring-offset-2 ring-offset-slate-50;
+}
+
+.dark :focus-visible {
+  @apply ring-offset-slate-950;
+}
+
+/* Table headers never break mid-word (CJK headers otherwise stack one glyph per line). */
+th {
+  white-space: nowrap;
+}
+
+/* Phones: tables keep a readable width and scroll sideways inside their wrapper
+   instead of squeezing every column to a few characters. Tables that instead
+   HIDE secondary columns on mobile opt out with data-responsive so their core
+   columns fit the screen without a forced horizontal scroll. */
+@media (max-width: 767px) {
+  .overflow-x-auto > table:not([data-responsive]) {
+    min-width: 36rem;
+  }
+}
+
+/* Native date inputs follow the active theme (dark mode flips the picker icon
+   and spinners to a light-on-dark palette instead of the browser default light). */
+.dark input[type='date'],
+.dark input[type='datetime-local'],
+.dark input[type='time'] {
+  color-scheme: dark;
+}
+
+input[type='date'],
+input[type='datetime-local'],
+input[type='time'] {
+  color-scheme: light;
+}
+
+.dark input[type='date']::-webkit-calendar-picker-indicator,
+.dark input[type='datetime-local']::-webkit-calendar-picker-indicator,
+.dark input[type='time']::-webkit-calendar-picker-indicator {
+  filter: invert(0.8);
+}

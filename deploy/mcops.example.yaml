@@ -1,0 +1,43 @@
+# mc-ops 配置（首次安装时由 deploy/install.sh 生成）。
+# 这里只是默认值：大部分项都可以在面板「设置 → 服务器配置」里改，改过的以面板为准。
+# 只有下面标「仅此处」的项必须在这个文件里改（改完 systemctl --user restart mcops-agent）。
+
+mode: control                       # 仅此处。control：mc-ops 托管服务端；observe：只读旁路观测
+data_dir: __HOME__/.local/share/mcops   # 仅此处
+secrets_file: secrets.yaml          # 仅此处。相对本文件目录；权限必须 600
+log_level: INFO
+
+server:
+  backend: systemd                  # systemd --user 托管（需要 loginctl enable-linger）
+  manage_unit: true                 # 由 mc-ops 生成 mc-server.service
+  systemd_unit: mc-server.service
+  game_dir: __HOME__/minecraft/server
+  jar: "fabric-server-mc.*.jar"     # 安装向导装好后自动匹配
+  java_bin: java
+  java_opts: ["-Xms4G", "-Xmx4G"]
+  port: 25565
+  rcon_port: 25575
+
+ops:
+  restart_time: "05:00"             # 每日定时重启 + 冷备份（本地时间），null 关闭
+  warn_minutes: 5
+  backup_keep_days: 7
+  backup_min_keep: 3
+
+api:
+  host: 127.0.0.1                   # 仅此处。面板只监听回环地址，经 SSH 隧道 / WireGuard 访问
+  port: 8765                        # 仅此处
+  static_dir: __HOME__/mc-ops/web/dist   # 仅此处
+
+# —— 可选：采集云主机上 frps 的日志（拿到外部连接的真实 IP），仅此处 ——
+# 1. mc-server 上：ssh-keygen -t ed25519 -N '' -f ~/.config/mcops/edge_ed25519
+#                 ssh-keyscan -H <云主机地址> > ~/.config/mcops/edge_known_hosts
+# 2. 云主机上：sudo bash deploy/edge/install-on-frps-host.sh "$(cat edge_ed25519.pub 的内容)"
+# 3. 取消下面的注释并填写，然后 systemctl --user restart mcops-agent
+# edge:
+#   host: frps.example.com
+#   key_file: __HOME__/.config/mcops/edge_ed25519
+#   known_hosts: __HOME__/.config/mcops/edge_known_hosts
+#   public_ports:                     # 只用于「网络」页展示 frps 对外开放了哪些端口
+#     - {port: 25565, proxy: minecraft, desc: Minecraft}
+#     - {port: 7000, proxy: frp, desc: frp 控制连接}

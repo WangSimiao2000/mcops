@@ -1,0 +1,27 @@
+# systemd --user 单元：~/.config/systemd/user/mcops-agent.service
+[Unit]
+Description=mc-ops agent (Minecraft 运维平台)
+After=network-online.target
+
+[Service]
+UMask=0077
+Type=simple
+WorkingDirectory=%h/mc-ops
+ExecStart=%h/mc-ops/.venv/bin/mcops-agent --config %h/.config/mcops/mcops.yaml
+Restart=on-failure
+RestartSec=5
+# 资源上限：不能和 MC 抢内存
+MemoryMax=512M
+Nice=5
+NoNewPrivileges=yes
+# 只用纯 seccomp 实现的加固项。不要加 ProtectKernel*/ProtectControlGroups/ProtectSystem/PrivateTmp：
+# 在 user 单元里它们会隐式开启 PrivateUsers（独立 user namespace），agent 就读不到
+# /proc/<MC 进程>/cwd，观测模式会找不到服务端进程（PrivateTmp 生产实测、ProtectKernel* 2026-10-10 实测）。
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=default.target

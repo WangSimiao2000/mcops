@@ -1,0 +1,5 @@
+# build / tooling artifacts (dist and node_modules are ignored at repo root)
+*.tsbuildinfo
+coverage/
+*.local
+screenshots/

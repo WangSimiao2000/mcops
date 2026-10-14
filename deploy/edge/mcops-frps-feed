@@ -1,0 +1,13 @@
+#!/bin/sh
+# mc-ops 边缘采集：作为 mcops-ro 用户 authorized_keys 的 forced command 运行。
+# 只输出 frps 的 journald（JSON）；客户端只能传入一个续传游标，格式严格校验。
+set -eu
+cur="${SSH_ORIGINAL_COMMAND:-}"
+case "$cur" in
+  "")
+    exec journalctl -u frps -f -o json --no-pager --since "-1h" ;;
+  *[!A-Za-z0-9=\;_-]*)
+    echo "mcops-frps-feed: invalid cursor" >&2; exit 2 ;;
+  *)
+    exec journalctl -u frps -f -o json --no-pager --after-cursor="$cur" ;;
+esac

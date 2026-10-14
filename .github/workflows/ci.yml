@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.23"
+      - run: uv sync --locked
+      - run: uv run ruff format --check src tests dev
+      - run: uv run ruff check src tests dev
+      - run: uv run mypy
+      - name: Install restic (pinned, sha256-verified)
+        run: |
+          curl -sSLo restic.bz2 https://github.com/restic/restic/releases/download/v0.19.1/restic_0.19.1_linux_amd64.bz2
+          echo "f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151585c  restic.bz2" > restic.sha256
+          sha256sum -c restic.sha256
+          bunzip2 restic.bz2 && install -m 755 restic "$HOME/.local/bin/restic" || { mkdir -p "$HOME/.local/bin" && install -m 755 restic "$HOME/.local/bin/restic"; }
+      - run: uv run pytest -q
+
+  web:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run test
+      - run: npm run build
