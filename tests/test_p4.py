@@ -155,3 +155,11 @@ def test_bundle_revision_accepts_hash_and_tag(rev: str, ok: bool) -> None:
     from mcops.appsetup import REV_RE
 
     assert bool(REV_RE.match(rev)) is ok
+
+
+def test_version_comes_from_package_metadata() -> None:
+    from importlib.metadata import version
+
+    import mcops
+
+    assert mcops.__version__ == version("mcops")
