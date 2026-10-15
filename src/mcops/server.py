@@ -29,6 +29,9 @@ from mcops.supervisor import spawn_logged
 
 log = logging.getLogger(__name__)
 
+# watch_process 连续多少次（每次间隔 1 秒）查不到进程才判定崩溃
+CRASH_CONFIRM = 5
+
 
 class State(StrEnum):
     STOPPED = "stopped"
@@ -261,20 +264,53 @@ class ServerController:
 
     # ---- 后台任务 ---------------------------------------------------------
 
-    async def watch_process(self, interval_s: float = 1.0) -> None:
-        """进程意外消失 → crashed（M1 的 watchdog 在此基础上做自愈与告警）。"""
+    async def watch_process(self, interval_s: float = 1.0, confirm: int = CRASH_CONFIRM) -> None:
+        """进程意外消失 → crashed（M1 的 watchdog 在此基础上做自愈与告警）。
+
+        - 连续 ``confirm`` 次查不到进程才判崩溃：systemd 后端靠 ``systemctl --user show``
+          取 PID，系统升级时 user manager 会 daemon-reexec，几秒内查询失败，不能当成崩溃
+          （2026-10-15 06:01 就这样把正在运行的服务器误判为崩溃）。
+        - 处于 crashed 却又查到了进程（误判、或自动重启撞上"进程已在运行"）→ 重新接管为
+          running，面板不会一直卡在"已崩溃"。
+        """
+        misses = 0
         while True:
             await asyncio.sleep(interval_s)
             if self.observe:
                 await self._observe_tick()
                 continue
-            if self.state is not State.RUNNING:
+            if self.state is State.CRASHED:
+                misses = 0
+                await self._readopt_if_alive()
                 continue
-            if await self.backend.pid() is None:
-                self.started_at = None
-                self._pid = None
-                self._set_state(State.CRASHED)
-                await self.bus.emit(Event("server_crashed", "server"))
+            if self.state is not State.RUNNING:
+                misses = 0
+                continue
+            if await self.backend.pid() is not None:
+                misses = 0
+                continue
+            misses += 1
+            if misses < confirm:
+                continue
+            misses = 0
+            self.started_at = None
+            self._pid = None
+            self._set_state(State.CRASHED)
+            await self.bus.emit(Event("server_crashed", "server"))
+
+    async def _readopt_if_alive(self) -> None:
+        async with self._op_lock:
+            if self.state is not State.CRASHED:
+                return
+            pid = await self.backend.pid()
+            if pid is None:
+                return
+            self._pid = pid
+            self.started_at = _proc_started_monotonic(pid)
+            self._ready.set()
+            self._set_state(State.RUNNING)
+        log.warning("crashed 状态下发现服务端进程 %s 仍在运行，已重新接管", pid)
+        await self.bus.emit(Event("server_adopted", "server", {"pid": pid, "reason": "recovered"}))
 
     async def _observe_tick(self) -> None:
         """观测模式：只跟随进程是否存在（旧脚本每天 05:00 计划重启，不能算崩溃）。"""
