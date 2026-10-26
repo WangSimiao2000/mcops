@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import logging
 import shutil
 import time
@@ -14,6 +15,7 @@ from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, tzinfo
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import desc, insert, select, update
@@ -24,7 +26,7 @@ from mcops.backup import MEMBERS, BackupConfig, clean_backups, create_backup, pa
 from mcops.config import Config
 from mcops.events import Event, EventBus
 from mcops.gamecfg import jar_version, sync_motd
-from mcops.restic import OffsiteTarget, Restic, ResticError
+from mcops.restic import STOPPED_TAG, OffsiteTarget, Restic, ResticError
 from mcops.server import ConflictError, ServerController, State
 
 log = logging.getLogger(__name__)
@@ -239,6 +241,9 @@ class Ops:
         self.backup_cfg, self.cfg, self.tz = backup_cfg, cfg, tz
         self.announce_maintenance = announce_maintenance
         self.raise_alert = raise_alert
+        # 定时重启的停服窗口里（备份之后、开服之前）要顺便做的事，例如复制存档给地图渲染。
+        # 钩子失败只记一笔，不影响开服。
+        self.restart_hooks: list[Callable[[Callable[[str], None]], Awaitable[None]]] = []
         self.sleep = sleep
         self.jobs = JobRunner(engine, bus.events.publish)
         # 异地复制可能跑好几个小时（首次全量上传），单独一把锁，不挡定时重启和 Mod 操作
@@ -258,20 +263,39 @@ class Ops:
             note(f"服务器当前为 {srv.state}，跳过倒计时直接备份")
         srv.planned_by = "scheduled-restart"  # 备份期间的停机也是计划内
         try:
-            note("冷备份")
             backup_err: Exception | None = None
             removed: list[str] = []
             try:
-                path = await create_backup(self.backup_cfg, running=False)
-                backup_name = path.name
-                removed = await asyncio.to_thread(clean_backups, self.backup_cfg)
-                note(
-                    f"备份 {path.name}（{path.stat().st_size / 2**20:.0f} MB），"
-                    f"清理 {len(removed)} 个旧备份"
-                )
+                if self.restic is not None:
+                    # 已有 restic：停服时拍一个增量快照代替 tar 冷备份（只写变化的块，停服更短）
+                    note("停服快照（restic）")
+                    res = await self._stopped_snapshot("daily")
+                    backup_name = f"restic:{res['snapshot']}"
+                    # 以前的 tar 冷备份满保留天数后全部清掉，不再保底留几个
+                    removed = await asyncio.to_thread(
+                        clean_backups, dataclasses.replace(self.backup_cfg, min_keep=0)
+                    )
+                    note(
+                        f"停服快照 {res['snapshot']}：新增 {res['added_bytes'] / 2**20:.1f} MB，"
+                        f"用时 {res['seconds']}s；清理 {len(removed)} 个旧 tar 冷备份"
+                    )
+                else:
+                    note("冷备份")
+                    path = await create_backup(self.backup_cfg, running=False)
+                    backup_name = path.name
+                    removed = await asyncio.to_thread(clean_backups, self.backup_cfg)
+                    note(
+                        f"备份 {path.name}（{path.stat().st_size / 2**20:.0f} MB），"
+                        f"清理 {len(removed)} 个旧备份"
+                    )
             except Exception as e:  # 备份失败也必须把服务器开回来，任务最后再记为失败
                 backup_err = e
-                note(f"冷备份失败：{type(e).__name__}: {e}；继续开服")
+                note(f"备份失败：{type(e).__name__}: {e}；继续开服")
+            for hook in self.restart_hooks:
+                try:
+                    await hook(note)
+                except Exception as e:
+                    note(f"停服钩子失败：{type(e).__name__}: {e}")
             note("开服")
             await srv.start()
             state = await srv.wait_state(
@@ -281,7 +305,7 @@ class Ops:
                 raise RuntimeError("重启后服务器未就绪")
             note("服务器已就绪")
             if backup_err is not None:
-                raise RuntimeError(f"服务器已恢复，但冷备份失败：{backup_err}") from backup_err
+                raise RuntimeError(f"服务器已恢复，但备份失败：{backup_err}") from backup_err
             return {"backup": backup_name, "removed": removed}
         finally:
             # 没能开回来时清掉"计划内"标记：之后的停机/崩溃要按真实故障播报
@@ -324,9 +348,17 @@ class Ops:
                     note, self.cfg.warn_minutes, f"升级到 {t.mc}", "game-upgrade", 1800
                 )
             srv.planned_by = "game-upgrade"
-            note("冷备份（升级前完整备份，失败时从这里恢复世界）")
-            backup = await create_backup(self.backup_cfg, running=False)
-            note(f"备份完成：{backup.name}")
+            snap: str | None = None
+            backup: Path | None = None
+            if self.restic is not None:
+                note("停服快照（升级前，失败时从这里恢复世界）")
+                snap = (await self._stopped_snapshot("pre-upgrade"))["snapshot"]
+                backup_name = f"restic:{snap}"
+            else:
+                note("冷备份（升级前完整备份，失败时从这里恢复世界）")
+                backup = await create_backup(self.backup_cfg, running=False)
+                backup_name = backup.name
+            note(f"备份完成：{backup_name}")
             ts = datetime.now().strftime("%Y%m%d-%H%M%S")
             swap_dir = self.backup_cfg.game_dir / ".mcops-backup" / f"upgrade-{ts}"
             rec = await asyncio.to_thread(gv.swap_in, self.backup_cfg.game_dir, prep, swap_dir)
@@ -352,9 +384,13 @@ class Ops:
                         await srv.wait_state(State.STOPPED, timeout=srv.cfg.stop_timeout_s + 60)
                 srv.state = State.STOPPED
                 await asyncio.to_thread(gv.swap_out, self.backup_cfg.game_dir, rec)
-                await asyncio.to_thread(
-                    gv.restore_world, self.backup_cfg.game_dir, backup, swap_dir / "failed"
-                )
+                if snap is not None:
+                    await self._restore_world_from_snapshot(snap, swap_dir / "failed")
+                else:
+                    assert backup is not None
+                    await asyncio.to_thread(
+                        gv.restore_world, self.backup_cfg.game_dir, backup, swap_dir / "failed"
+                    )
                 srv.cfg.jar, srv.cfg.java_bin = old_cfg
                 note("已恢复旧版本的文件和世界，用旧版本开服")
                 await srv.start()
@@ -373,10 +409,33 @@ class Ops:
             if prep.java_bin != old_cfg[1] and on_java_changed is not None:
                 await on_java_changed(prep.java_bin)
             note(f"升级完成：Minecraft {t.mc}，Fabric Loader {t.loader}")
-            return {"mc": t.mc, "loader": t.loader, "backup": backup.name, "swap_dir": swap_dir.name,
+            return {"mc": t.mc, "loader": t.loader, "backup": backup_name, "swap_dir": swap_dir.name,
                     "mods_updated": rec.new_mods, "mods_disabled": prep.disable}  # fmt: skip
 
         return run
+
+    async def _stopped_snapshot(self, kind: str) -> dict[str, Any]:
+        """停服状态下拍 restic 快照（标签 stopped + kind）。不在这里 forget：异地复制可能正读着仓库，
+        forget 要独占锁；保留策略在下一次定时快照时一起执行。"""
+        assert self.restic is not None
+        if await self.restic.ensure_repo():
+            log.info("已初始化 restic 仓库 %s", self.restic.repo)
+        return await self.restic.backup(tags=[STOPPED_TAG, kind])
+
+    async def _restore_world_from_snapshot(self, snap: str, quarantine: Path) -> None:
+        """从本机快照解出 world/ 替换当前世界；当前 world 移到 quarantine 留作排查，不删除。"""
+        assert self.restic is not None
+        game = self.backup_cfg.game_dir
+        tmp = quarantine.parent / "restore-world"
+        shutil.rmtree(tmp, ignore_errors=True)
+        await self.restic.restore(snap, tmp, ["world"])
+        if not (tmp / "world" / "level.dat").is_file():
+            raise ResticError(f"快照 {snap} 里没有 world/level.dat")
+        quarantine.mkdir(parents=True, exist_ok=True)
+        if (game / "world").exists():
+            shutil.move(str(game / "world"), str(quarantine / "world"))
+        shutil.move(str(tmp / "world"), str(game / "world"))
+        shutil.rmtree(tmp, ignore_errors=True)
 
     async def manual_backup(self, note: Callable[[str], None]) -> dict[str, Any]:
         running = self.server.state is State.RUNNING and not self.server.observe
@@ -658,6 +717,26 @@ class Ops:
                 ev = await q.get()
                 if ev.type in ("server_crashed", "server_start_failed"):
                     await self._on_crash(ev)
+                elif ev.type == "server_foreign_instance" and self.raise_alert:
+                    await self.raise_alert(
+                        "server_foreign_instance",
+                        ev.ts,
+                        "mc-ops 之外已有服务端在运行，未启动",
+                        f"{ev.data.get('reason', '')}。请检查是否有遗留的开机脚本或系统级服务"
+                        "（如 /etc/systemd/system 下的旧单元、crontab @reboot、tmux），"
+                        "停掉后在面板里重新开服。",
+                        None,
+                        dict(ev.data),
+                    )
+                elif ev.type == "server_stop_failed" and self.raise_alert:
+                    await self.raise_alert(
+                        "server_stop_failed",
+                        ev.ts,
+                        "关服失败，服务端进程仍在运行",
+                        f"{ev.data.get('error', '')}。已恢复为运行中，请在面板查看控制台。",
+                        None,
+                        dict(ev.data),
+                    )
                 elif ev.type == "server_ready":
                     pass
 
@@ -774,9 +853,13 @@ def install_game_hooks(cfg: Config, server: ServerController) -> None:
 
     if o.spawn is not None:
         x, y, z = o.spawn
+        # 1.21.9+ 语法：setworldspawn <pos> [<yaw> <pitch>]
+        cmd = f"setworldspawn {x} {y} {z}"
+        if o.spawn_yaw is not None:
+            cmd += f" {o.spawn_yaw:g} 0"
 
         async def spawn_hook() -> None:
-            out = await server.rcon.command(f"setworldspawn {x} {y} {z}")
-            log.info("setworldspawn %d %d %d：%s", x, y, z, out.strip())
+            out = await server.rcon.command(cmd)
+            log.info("%s：%s", cmd, out.strip())
 
         server.post_ready_hooks.append(spawn_hook)

@@ -16,11 +16,16 @@ fi
 [ -n "$UV" ] || { echo "找不到 uv（需要 0.12.x），安装方法见 https://docs.astral.sh/uv/getting-started/installation/"; exit 1; }
 command -v npm >/dev/null || { echo "找不到 npm（需要 Node.js 20+）"; exit 1; }
 rm -rf "$OUT" && mkdir -p "$OUT/wheels"
-"$UV" export --frozen --no-dev --no-emit-project --format requirements-txt -q > "$OUT/requirements.txt"
+"$UV" export --frozen --no-dev --extra map --no-emit-project --format requirements-txt -q > "$OUT/requirements.txt"
 "$UV" run --with pip==25.2 python -m pip download -q -r "$OUT/requirements.txt" \
   -d "$OUT/wheels" --only-binary=:all: --require-hashes
 "$UV" build --wheel -q -o "$OUT/wheels"
-(cd web && npm ci --silent && npm run -s build)
+# MCOPS_REUSE_WEB=1：前端没改动时复用现有 web/dist（开发机内存紧张时省掉 npm ci + vite）
+if [ "${MCOPS_REUSE_WEB:-}" = 1 ] && [ -f web/dist/index.html ]; then
+  echo "复用现有 web/dist" >&2
+else
+  (cd web && npm ci --silent && npm run -s build)
+fi
 cp -r web/dist "$OUT/web-dist"
 cp -r deploy "$OUT/deploy"
 git describe --tags --always > "$OUT/REVISION"

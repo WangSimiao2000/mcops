@@ -6,7 +6,7 @@ import asyncio
 import os
 import tarfile
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -210,6 +210,37 @@ async def test_scheduled_restart_flow(env: Env) -> None:
     assert env.ops.announced[0]["warn_minutes"] == 2  # type: ignore[attr-defined]
     assert env.srv.state is State.RUNNING and env.backend.started == 2
     assert env.srv.planned_by is None  # 开服后清除
+
+
+async def test_restart_hooks_run_while_stopped_and_failures_dont_block(env: Env) -> None:
+    await _running(env)
+    seen: list[State] = []
+
+    async def hook(note: Callable[[str], None]) -> None:
+        seen.append(env.srv.state)
+        note("hook ran")
+
+    async def broken(_note: Callable[[str], None]) -> None:
+        raise RuntimeError("boom")
+
+    env.ops.restart_hooks += [broken, hook]
+
+    async def stopper() -> None:
+        while "stop" not in env.rcon.commands:
+            await asyncio.sleep(0.02)
+        env.backend.alive = False
+        while env.srv.state is not State.STARTING:
+            await asyncio.sleep(0.02)
+        env.srv._ready.set()
+
+    t = asyncio.create_task(stopper())
+    await env.ops.jobs.run("scheduled_restart", "test", env.ops.scheduled_restart)
+    await t
+    (h,) = await env.ops.jobs.history()
+    assert h["status"] == "ok"
+    assert "停服钩子失败：RuntimeError: boom" in h["log"] and "hook ran" in h["log"]
+    assert seen and seen[0] is not State.RUNNING  # 钩子在停服窗口里执行
+    assert env.srv.state is State.RUNNING
 
 
 async def test_planned_stop_is_not_a_crash(env: Env) -> None:

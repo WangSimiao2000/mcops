@@ -19,6 +19,7 @@ import {
 import { FALLBACK_REFETCH_MS } from '@/lib/live';
 import { scrollBox } from '@/lib/scroll';
 import { LiveJobPanel } from '@/pages/ops/LiveJobPanel';
+import { MapCard } from '@/pages/ops/MapCard';
 
 const OBSERVE_HINT =
   '观测模式：定时任务与备份仍由旧脚本（crontab）负责，面板暂不接管。切换到控制模式后此页可用。';
@@ -266,6 +267,8 @@ export function OpsPage() {
           ))
         )}
       </div>
+
+      <MapCard />
 
       <Card>
         <CardHeader title={`运行历史（${history.length}）`} />

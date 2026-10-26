@@ -20,6 +20,7 @@ import type {
   InteractionsResponse,
   IpInfo,
   JobRunAccepted,
+  MapStatus,
   JobsResponse,
   MeResponse,
   NotifyChannel,
@@ -234,6 +235,14 @@ export const api = {
     return apiFetch<JobRunAccepted>(`/jobs/${encodeURIComponent(job)}/run`, {
       method: 'POST',
     });
+  },
+
+  mapStatus(signal?: AbortSignal): Promise<MapStatus> {
+    return apiFetch<MapStatus>('/map', signal ? { signal } : {});
+  },
+
+  runMap(): Promise<JobRunAccepted> {
+    return apiFetch<JobRunAccepted>('/map/run', { method: 'POST' });
   },
 
   watchdogReset(): Promise<WatchdogResetResponse> {

@@ -110,6 +110,18 @@ RULES: dict[str, Rule] = {
         ),
         Rule("server_crash", "服务器意外停止", "进程意外退出或启动失败，已自动重启", "warning"),
         Rule(
+            "server_foreign_instance",
+            "服务端在 mc-ops 之外运行",
+            "启动前发现游戏端口已被监听或存档被其他进程锁住（例如遗留的开机脚本），mc-ops 未启动",
+            "critical",
+        ),
+        Rule(
+            "server_stop_failed",
+            "关服失败",
+            "发出 stop 并强制结束后服务端进程仍在运行，已恢复为运行中",
+            "critical",
+        ),
+        Rule(
             "server_crash_loop",
             "服务器反复崩溃",
             "窗口期内崩溃达到阈值，已停止自动重启，需要人工处理",

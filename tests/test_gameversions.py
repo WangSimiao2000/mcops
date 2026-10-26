@@ -311,3 +311,43 @@ async def test_game_upgrade_job_rolls_back(ops_env: Env, tmp_path: Path) -> None
         not (g / "mods" / "lithium-2.0.jar").exists() and (g / "mods" / "lithium-1.0.jar").exists()
     )
     assert env.backend.started == 3  # 原来 1 次 + 新版本 1 次 + 回滚后旧版本 1 次
+
+
+async def test_game_upgrade_rolls_back_world_from_restic(ops_env: Env, tmp_path: Path) -> None:
+    """开了 restic：升级前拍停服快照，新版本开不起来时从快照恢复世界（新版本已经改过的世界移走）。"""
+    import shutil
+
+    from mcops.restic import Restic
+
+    restic = shutil.which("restic") or str(Path.home() / ".local/bin/restic")
+    if not Path(restic).exists():
+        pytest.skip("restic 未安装")
+    env = ops_env
+    g = env.ops.backup_cfg.game_dir
+    env.ops.restic = Restic(restic, str(tmp_path / "repo"), "pw", g, timeout_s=120)
+    prep = await _prep_for(env, tmp_path)
+    (g / "world" / "level.dat").write_bytes(b"old-world")
+    await _running(env)
+
+    async def cycle() -> None:
+        while "stop" not in env.rcon.commands:
+            await asyncio.sleep(0.02)
+        env.backend.alive = False
+        while env.backend.started < 2:
+            await asyncio.sleep(0.02)
+        (g / "world" / "level.dat").write_bytes(b"converted-by-new-version")
+        env.backend.alive = False  # 新版本一启动就崩
+        while env.backend.started < 3:
+            await asyncio.sleep(0.02)
+        env.srv._ready.set()
+
+    t = asyncio.create_task(cycle())
+    with pytest.raises(RuntimeError, match="已回滚"):
+        await env.ops.game_upgrade(prep)(lambda _m: None)
+    await t
+    assert (g / "world" / "level.dat").read_bytes() == b"old-world"
+    assert not any(env.ops.backup_cfg.backup_dir.glob("mc-backup-*"))  # 没打 tar
+    (snap,) = await env.ops.restic.snapshots()
+    assert set(snap["tags"]) == {"stopped", "pre-upgrade"}
+    failed = next((g / ".mcops-backup").glob("upgrade-*/failed/world/level.dat"))
+    assert failed.read_bytes() == b"converted-by-new-version"

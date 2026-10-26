@@ -39,8 +39,10 @@ from mcops.bot.texts import mask_openid
 from mcops.config import ApiConfig
 from mcops.edge import EdgeCollector
 from mcops.events import Broadcaster, Event, EventBus
+from mcops.mapgen.publish import MapPublisher
 from mcops.players import ServerFiles
 from mcops.server import ConflictError, ServerController
+from mcops.statuspub import StatusPublisher
 from mcops.supervisor import Supervisor
 
 log = logging.getLogger(__name__)
@@ -82,6 +84,8 @@ class Services:
         self.secrets_file: Any = None  # Path，面板改密 / 机密写回
         self.download_rate_kib: int = 512  # 备份下载限速（ops.download_rate_kib）
         self.edge = edge
+        self.status_publisher: StatusPublisher | None = None
+        self.map_publisher: MapPublisher | None = None
         self.mode = mode
         self.alerts: Broadcaster[dict[str, Any]] = Broadcaster()
         self.api_cfg = api_cfg
@@ -523,6 +527,35 @@ def create_app(services_factory: Callable[[], Awaitable[Services]] | None = None
         _ops(s).reset_watchdog()
         await s.audit(sess.user, "watchdog.reset")
         return {"ok": True}
+
+    # ---- 世界地图（mapgen/publish.py） ----
+
+    @app.get("/api/map")
+    async def map_status(_: SessionDep, s: SvcDep) -> dict[str, Any]:
+        if s.map_publisher is None:
+            return {"enabled": False}
+        return await asyncio.to_thread(s.map_publisher.status)
+
+    @app.post("/api/map/run", status_code=202)
+    async def map_run(sess: SessionDep, s: SvcDep) -> dict[str, bool]:
+        pub = s.map_publisher
+        if pub is None:
+            raise HTTPException(404, "未配置 map_publish")
+        if pub.running:
+            raise HTTPException(409, f"地图正在生成（{pub.phase}）")
+        s.supervisor.run_once("map:manual", pub.run_once(f"web:{sess.user}"))
+        await s.audit(sess.user, "map.run")
+        return {"accepted": True}
+
+    @app.get("/api/map/preview")
+    async def map_preview(_: SessionDep, s: SvcDep) -> FileResponse:
+        if s.map_publisher is None or not s.map_publisher.preview_path().exists():
+            raise HTTPException(404, "还没有地图")
+        return FileResponse(
+            s.map_publisher.preview_path(),
+            media_type="image/webp",
+            headers={"Cache-Control": "no-cache"},
+        )
 
     @app.get("/api/backups")
     async def backups(_: SessionDep, s: SvcDep) -> dict[str, Any]:
