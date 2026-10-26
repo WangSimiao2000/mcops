@@ -25,20 +25,42 @@ class ResticError(RuntimeError):
     pass
 
 
+STOPPED_TAG = "stopped"
+"""停服时拍的快照（每日重启、升级前）。单独计数保留，保证升级回滚、回退总有一致的停服版本可用。"""
+
+
 @dataclass
 class RetentionPolicy:
     keep_hourly: int = 24
     keep_daily: int = 14
     keep_weekly: int = 8
     keep_monthly: int = 6
+    keep_stopped: int = 7
 
     def args(self) -> list[str]:
+        """主策略：停服快照不在这里删（--keep-tag），由 stopped_args() 单独按个数保留。"""
         return [
             f"--keep-hourly={self.keep_hourly}",
             f"--keep-daily={self.keep_daily}",
             f"--keep-weekly={self.keep_weekly}",
             f"--keep-monthly={self.keep_monthly}",
-        ]
+            "--keep-tag", STOPPED_TAG,
+        ]  # fmt: skip
+
+    def stopped_args(self) -> list[str]:
+        return ["--tag", STOPPED_TAG, f"--keep-last={max(self.keep_stopped, 1)}"]
+
+
+def _count_removed(out: str) -> int:
+    removed = 0
+    for line in out.splitlines():
+        try:
+            groups = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(groups, list):
+            removed += sum(len(x.get("remove") or []) for x in groups)
+    return removed
 
 
 @dataclass
@@ -307,33 +329,20 @@ class Restic:
             *g, "copy", "--host", "mc-server", target=target, timeout_s=24 * 3600
         )
         copied = len(re.findall(r"^snapshot [0-9a-f]+ saved", out, re.M))
-        fargs = [*g, "forget", "--json", "--host", "mc-server", *self.policy.args()]
-        if prune:
-            fargs.append("--prune")
-        _, fout = await self._run(*fargs, target=target, timeout_s=6 * 3600)
-        removed = 0
-        for line in fout.splitlines():
-            try:
-                groups = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(groups, list):
-                removed += sum(len(x.get("remove") or []) for x in groups)
+        removed = await self.forget(prune, target)
         return {"initialized": new, "copied": copied, "forgot": removed, "pruned": prune}
 
-    async def forget(self, prune: bool) -> int:
-        args = ["forget", "--json", "--host", "mc-server", *self.policy.args()]
-        if prune:
-            args.append("--prune")
-        _, out = await self._run(*args)
+    async def forget(self, prune: bool, target: OffsiteTarget | None = None) -> int:
+        """两遍：主策略（不动停服快照）→ 停服快照只留最近 keep_stopped 个。prune 放在最后一遍。"""
+        g = target.global_args() if target else []
+        base = [*g, "forget", "--json", "--host", "mc-server"]
         removed = 0
-        for line in out.splitlines():
-            try:
-                groups = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(groups, list):
-                removed += sum(len(g.get("remove") or []) for g in groups)
+        for i, pol in enumerate((self.policy.args(), self.policy.stopped_args())):
+            args = [*base, *pol]
+            if prune and i == 1:
+                args.append("--prune")
+            _, out = await self._run(*args, target=target, timeout_s=6 * 3600)
+            removed += _count_removed(out)
         return removed
 
     async def snapshots(self, target: OffsiteTarget | None = None) -> list[dict[str, Any]]:

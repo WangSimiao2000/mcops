@@ -36,6 +36,35 @@ def test_refuses_non_loopback_bind(tmp_path: Path) -> None:
         load_config(_write(tmp_path, host="0.0.0.0"))
 
 
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    [
+        ("  spawn: [181, 107, 124]\n", "setworldspawn 181 107 124"),
+        ("  spawn: [181, 107, 124]\n  spawn_yaw: -67.5\n", "setworldspawn 181 107 124 -67.5 0"),
+    ],
+)
+async def test_spawn_hook_command(tmp_path: Path, extra: str, expected: str) -> None:
+    from types import SimpleNamespace
+
+    from mcops.ops import install_game_hooks
+
+    path = _write(tmp_path)
+    path.write_text(path.read_text() + "ops:\n" + extra)
+    sent: list[str] = []
+
+    async def command(c: str) -> str:
+        sent.append(c)
+        return "ok"
+
+    srv = SimpleNamespace(
+        pre_start_hooks=[], post_ready_hooks=[], rcon=SimpleNamespace(command=command)
+    )
+    install_game_hooks(load_config(path).config, srv)  # type: ignore[arg-type]
+    for hook in srv.post_ready_hooks:
+        await hook()
+    assert sent == [expected]
+
+
 def test_refuses_world_readable_secrets(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="600"):
         load_config(_write(tmp_path, secret_mode=0o644))

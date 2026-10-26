@@ -221,7 +221,11 @@ async def run_checks(s: Any) -> list[dict[str, Any]]:
             if cfg.ops.backup_dir and cfg.ops.backup_dir.is_dir()
             else []
         )
-        if not bks:
+        if cfg.ops.restic.enabled:
+            add("backup", "备份", "冷备份", "info",
+                f"每日重启改为拍停服 restic 快照（保留最近 {cfg.ops.restic.keep_stopped} 个）；"
+                f"剩余 {len(bks)} 个旧 tar 满 {cfg.ops.backup_keep_days} 天后自动删除")  # fmt: skip
+        elif not bks:
             add(
                 "backup",
                 "备份",
@@ -258,7 +262,7 @@ async def run_checks(s: Any) -> list[dict[str, Any]]:
                     f"最近一次 {h:.0f} 小时前",
                 )
             off = cfg.ops.restic.offsite
-            if not (off.s3_repo or off.smb_host):
+            if not (off.s3_repo or off.smb_host or off.smb_mac):
                 add(
                     "offsite",
                     "备份",

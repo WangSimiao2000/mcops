@@ -57,6 +57,7 @@ import type {
   Job,
   JobRun,
   JobRunAccepted,
+  MapStatus,
   JobsResponse,
   MeResponse,
   NotifyChannel,
@@ -1058,6 +1059,47 @@ export const mockApi = {
         }
       }
     }, 2000);
+    return { accepted: true };
+  },
+
+  async mapStatus(): Promise<MapStatus> {
+    await delay(80);
+    const run = {
+      started_at: '2026-10-17T05:03:10+08:00',
+      finished_at: '2026-10-17T05:09:40+08:00',
+      seconds: 390,
+      trigger: 'restart',
+      ok: true,
+      error: null,
+      result: {
+        snapshot: { regions: 457, copied: 12, removed: 0 },
+        render: { regions: 422, rendered: { '1': 12, '0': 5 }, tiles_written: 96, levels: 8, hot_tiles: 505, tiles: { '0': 505, '1': 1405, '2': 396 }, bytes: 134_000_000, seconds: 300 },
+        version: '1.21.11',
+      },
+    };
+    return {
+      enabled: true,
+      mode: 'restart',
+      schedule: null,
+      fallback_at: '06:30',
+      running: false,
+      phase: null,
+      started_at: null,
+      next_run: '2026-10-18T06:30:00+08:00',
+      pushed: true,
+      last: run,
+      history: [run],
+      last_error: null,
+      tiles: { levels: 8, generated_at: '2026-10-16T21:09:40+00:00', counts: { '0': 505, '1': 1405 } },
+      public_url: 'https://blog.example.com/server/map/',
+      has_preview: false,
+      hot_minutes: 60,
+      announce: true,
+    };
+  },
+
+  async runMap(): Promise<JobRunAccepted> {
+    await delay(80);
     return { accepted: true };
   },
 

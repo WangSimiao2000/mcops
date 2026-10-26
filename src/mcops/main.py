@@ -30,6 +30,8 @@ from mcops.edge import EdgeCollector
 from mcops.events import Event, EventBus
 from mcops.flight import FlightWatch, is_fall_flying
 from mcops.hoststats import HostStats
+from mcops.mapgen.publish import MapPublisher
+from mcops.netdiscover import find_ip_by_mac
 from mcops.notify import NotifyHub
 from mcops.notifysettings import AlertGroup, EmailSettings, NotifySettings, QQSettings, RuleOverride
 from mcops.ops import Ops, OpsConfig, install_game_hooks
@@ -48,6 +50,7 @@ from mcops.restic import (
 from mcops.retention import retention_loop
 from mcops.security import SecurityConfig, SecurityEngine
 from mcops.server import ServerController, State
+from mcops.statuspub import StatusPublisher, detect_since
 from mcops.supervisor import Supervisor
 
 log = _logging.getLogger(__name__)
@@ -263,6 +266,47 @@ def build_app(loaded: LoadedConfig, config_path: Path | None = None) -> FastAPI:
         sup.spawn("whitelist_audit", lambda: run_whitelist_audit(security, files))
         if edge is not None:
             sup.spawn("edge_frps", edge.run)
+        sp = cfg.status_publish
+        if sp is not None and sp.enabled:
+            pub = StatusPublisher(
+                server.status_snapshot,
+                cfg.data_dir / "status-publish",
+                sp.remote,
+                sp.ssh_key,
+                cfg.data_dir / "status-publish-known_hosts",
+                sp.branch,
+                sp.interval_s,
+                since=lambda: sp.since or detect_since(cfg.server.game_dir),
+            )
+            svc.status_publisher = pub
+            sup.spawn("status_publish", pub.loop)
+        mp = cfg.map_publish
+        if mp is not None and mp.enabled:
+            mpub = MapPublisher(
+                game_dir=cfg.server.game_dir,
+                data_dir=cfg.data_dir,
+                remote=mp.remote,
+                ssh_key=mp.ssh_key,
+                branch=mp.branch,
+                run_at=mp.time
+                if (mp.time or svc.ops is None or not cfg.ops.restart_time)
+                else None,
+                tz=cfg.tzinfo(),
+                hot_minutes=mp.hot_minutes,
+                workers=mp.workers,
+                snapshot=server.status_snapshot,
+                command=server.rcon.command,
+                exclusive=svc.ops.jobs.exclusive if svc.ops is not None else None,
+                fallback_at=_after(cfg.ops.restart_time, 90) if cfg.ops.restart_time else "06:30",
+                announce=bot_rt.core.push
+                if mp.announce and bot_rt is not None and bot_rt.enabled
+                else None,
+                public_url=mp.public_url,
+            )
+            if mpub.run_at is None and svc.ops is not None:
+                svc.ops.restart_hooks.append(mpub.on_restart_stopped)
+            svc.map_publisher = mpub
+            sup.spawn("map_publish", mpub.loop)
         await bus.emit(Event("agent_started", "agent", {"mode": cfg.mode}))
         return svc
 
@@ -270,6 +314,13 @@ def build_app(loaded: LoadedConfig, config_path: Path | None = None) -> FastAPI:
     if cfg.api.static_dir is not None and (cfg.api.static_dir / "index.html").is_file():
         mount_static(app, cfg.api.static_dir)
     return app
+
+
+def _after(hhmm: str, minutes: int) -> str:
+    """HH:MM 往后推若干分钟（跨零点取模）。"""
+    h, m = map(int, hhmm.split(":"))
+    t = (h * 60 + m + minutes) % (24 * 60)
+    return f"{t // 60:02d}:{t % 60:02d}"
 
 
 async def _build_bot(
@@ -385,10 +436,32 @@ def load_with_overlay(path: Path) -> LoadedConfig:
         return base
 
 
+async def resolve_nas_host(
+    host: str, mac: str, find: Callable[[str, str], Awaitable[str | None]] | None = None
+) -> str:
+    """填了 MAC 就按 MAC 找 NAS 当前的 IP；没填、或找不到时用配置里的地址（行为和以前一样）。"""
+    if not mac:
+        return host
+    find = find or find_ip_by_mac
+    try:
+        ip = await find(mac, host)
+    except Exception as e:  # 发现失败不能挡住复制，退回配置的地址
+        log.warning("按 MAC 查找 NAS 失败：%s", e)
+        ip = None
+    if ip is None:
+        if not host:
+            raise ResticError(f"局域网里找不到 MAC 为 {mac} 的 NAS（NAS 没开机或不在同一网段？）")
+        log.warning("按 MAC %s 没找到 NAS，用配置的地址 %s", mac, host)
+        return host
+    if ip != host:
+        log.info("NAS（MAC %s）当前地址是 %s（配置里是 %s），本次用 %s", mac, ip, host or "空", ip)
+    return str(ip)
+
+
 def _make_offsite(cfg: Config, sec: Secrets) -> Callable[[], Awaitable[list[OffsiteTarget]]] | None:
     """按配置组装异地仓库；一个都没配则返回 None（面板不显示异地任务）。配置不全时任务失败并告警。"""
     o = cfg.ops.restic.offsite
-    if not cfg.ops.restic.enabled or not (o.s3_repo or o.smb_host):
+    if not cfg.ops.restic.enabled or not (o.s3_repo or o.smb_host or o.smb_mac):
         return None
 
     async def build() -> list[OffsiteTarget]:
@@ -402,15 +475,16 @@ def _make_offsite(cfg: Config, sec: Secrets) -> Callable[[], Awaitable[list[Offs
                     o.s3_repo, ak.get_secret_value(), sk.get_secret_value(), o.limit_upload_kib
                 )
             )
-        if o.smb_host:
+        if o.smb_host or o.smb_mac:
             if not o.smb_share:
                 raise ResticError("已填 NAS 地址，但没填共享名")
+            host = await resolve_nas_host(o.smb_host, o.smb_mac)
             user = sec.offsite_smb_user.get_secret_value() if sec.offsite_smb_user else ""
             pw = sec.offsite_smb_password.get_secret_value() if sec.offsite_smb_password else ""
             obscured = await rclone_obscure(o.rclone_binary, pw) if pw else ""
             out.append(
                 smb_target(
-                    o.smb_host,
+                    host,
                     o.smb_share,
                     o.smb_path,
                     user,
@@ -434,7 +508,7 @@ def _make_restic(cfg: Config, sec: Secrets) -> Restic | None:
     return Restic(
         r.binary, r.repo, sec.restic_password.get_secret_value(), cfg.server.game_dir,
         tuple(cfg.ops.backup_exclude),
-        RetentionPolicy(r.keep_hourly, r.keep_daily, r.keep_weekly, r.keep_monthly),
+        RetentionPolicy(r.keep_hourly, r.keep_daily, r.keep_weekly, r.keep_monthly, r.keep_stopped),
     )  # fmt: skip
 
 

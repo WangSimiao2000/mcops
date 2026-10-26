@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 import stat
-from datetime import datetime, tzinfo
+from datetime import date, datetime, tzinfo
 from pathlib import Path
 from typing import Any, Literal
 
@@ -84,6 +84,47 @@ class EdgeConfig(_Strict):
     )
 
 
+class StatusPublishConfig(_Strict):
+    """公开状态推送（statuspub.py）：脱敏的 status.json 推到开了 Pages 的仓库，博客读取。"""
+
+    enabled: bool = True
+    remote: str = Field(min_length=1, max_length=300)
+    """如 git@github.com:WangSimiao2000/mc-status.git"""
+    ssh_key: Path
+    """只对该仓库有写权限的部署密钥（私钥路径）。"""
+    branch: str = Field(default="main", pattern=r"^[A-Za-z0-9._/-]{1,100}$")
+    interval_s: float = Field(default=600.0, ge=360, le=86400)
+    """GitHub Pages 每小时约 10 次构建上限，最快 6 分钟一次。"""
+    since: date | None = None
+    """开服日期（公开的「已运行」从这天算起）；留空则取游戏目录 logs/ 里最早的日志日期。"""
+
+
+class MapPublishConfig(_Strict):
+    """每日等轴测地图（mapgen/publish.py）：渲染瓦片推到开了 Pages 的仓库，博客服务器页查看。
+
+    需要安装可选依赖：uv sync --extra map（numpy + pillow）。
+    """
+
+    enabled: bool = True
+    remote: str = Field(min_length=1, max_length=300)
+    """如 git@github.com:WangSimiao2000/mc-map.git"""
+    ssh_key: Path
+    """只对该仓库有写权限的部署密钥（私钥路径）。部署密钥不能跨仓库复用，要单独一把。"""
+    branch: str = Field(default="gh-pages", pattern=r"^[A-Za-z0-9._/-]{1,100}$")
+    """Pages 发布分支（仓库 Settings → Pages 里选这个分支）。"""
+    time: str | None = Field(default=None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    """留空（默认）= 跟着每日定时重启：停服时复制存档、开服后渲染，不需要 save-off；
+    填 HH:MM 则单独在这个时间生成（不停服，save-off 几秒复制）。当天错过了会补跑。"""
+    announce: bool = True
+    """生成完成且有区域变化时，让 QQ 机器人在玩家群里播报一句。"""
+    public_url: str | None = Field(default=None, max_length=300)
+    """公开的地图页面地址（面板里的链接、机器人播报里附上），如 https://blog.example.com/server/map/"""
+    hot_minutes: int = Field(default=60, ge=0, le=100000)
+    """玩家在区块附近累计待满这么多分钟，该处出高清（每方块 8px）瓦片；0 = 全图高清。"""
+    workers: int = Field(default=2, ge=1, le=8)
+    """渲染进程数（每个峰值约 500MB 内存）。"""
+
+
 class SmtpConfig(_Strict):
     host: str
     port: int = 465
@@ -141,6 +182,13 @@ class OffsiteSettings(_Strict):
     """S3 兼容存储的 restic 地址，如 s3:https://cos.ap-shanghai.myqcloud.com/<存储桶>/mc-ops。留空不启用。"""
     smb_host: str = Field(default="", max_length=253, pattern=r"^[A-Za-z0-9.:_-]*$")
     """局域网 NAS 的 IP 或主机名（SMB「网络邻居」）。留空不启用。"""
+    smb_mac: str = Field(
+        default="",
+        max_length=17,
+        pattern=r"^(([0-9A-Fa-f]{2}[:-]?){5}[0-9A-Fa-f]{2})?$",
+    )
+    """NAS 的 MAC 地址（可选）。填了就在每次复制前按 MAC 找 NAS 当前的 IP，DHCP 换了地址也能跟上；
+    找不到时退回上面的 NAS 地址。"""
     smb_share: str = Field(default="", max_length=200)
     """共享名（NAS 里开放给网络邻居的那个文件夹）。"""
     smb_path: str = Field(default="mc-ops-restic", max_length=200)
@@ -164,6 +212,8 @@ class ResticSettings(_Strict):
     keep_daily: int = Field(default=14, ge=0, le=1000)
     keep_weekly: int = Field(default=8, ge=0, le=1000)
     keep_monthly: int = Field(default=6, ge=0, le=1000)
+    keep_stopped: int = Field(default=7, ge=1, le=1000)
+    """停服快照（每日重启、升级前拍的）单独保留最近几个。开启 restic 后每日重启不再打 tar 冷备份。"""
     offsite: OffsiteSettings = Field(default_factory=OffsiteSettings)
     """异地副本：每次本地快照后，把新快照复制到下面配置了的仓库（可同时配两个）。"""
 
@@ -185,6 +235,8 @@ class OpsSettings(_Strict):
     backup_exclude: list[str] = Field(default_factory=lambda: ["logs", "crash-reports"])
     spawn: tuple[int, int, int] | None = None
     """每次开服就绪后执行 setworldspawn x y z。"""
+    spawn_yaw: float | None = Field(default=None, ge=-180, le=180)
+    """出生朝向（MC 偏航角：0 南、-90 东、90 西、180 北）。为空则不指定朝向。"""
     motd: MotdSettings | None = None
     """每次开服前同步到 server.properties / MiniMOTD。"""
     restic: ResticSettings = Field(default_factory=ResticSettings)
@@ -247,6 +299,8 @@ class Config(_Strict):
     server: ServerConfig
     security: SecurityRulesConfig = Field(default_factory=SecurityRulesConfig)
     edge: EdgeConfig | None = None
+    status_publish: StatusPublishConfig | None = None
+    map_publish: MapPublishConfig | None = None
     smtp: SmtpConfig | None = None
     bot: BotConfig | None = None
     ops: OpsSettings = Field(default_factory=OpsSettings)

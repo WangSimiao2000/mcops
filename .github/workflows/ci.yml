@@ -16,7 +16,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           version: "0.12.23"
-      - run: uv sync --locked
+      - run: uv sync --locked --extra map
       - run: uv run ruff format --check src tests dev
       - run: uv run ruff check src tests dev
       - run: uv run mypy

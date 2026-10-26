@@ -186,7 +186,18 @@ class SystemdBackend:
         await self._systemctl("stop", "--no-block", self._cfg.systemd_unit)
 
     async def kill(self) -> None:
-        await self._systemctl("kill", "--signal=SIGKILL", self._cfg.systemd_unit)
+        try:
+            await self._systemctl("kill", "--signal=SIGKILL", self._cfg.systemd_unit)
+        except RuntimeError as e:
+            # 主进程已被杀、但 cgroup 里的附属进程发信号失败时，systemctl 也返回非 0
+            # （"Failed to send signal SIGKILL to auxiliary processes: Invalid argument"，
+            # 2026-10-26 05:06）。以主进程是否还在为准，不在就算结束成功。
+            for _ in range(10):
+                if await self.pid() is None:
+                    log.warning("systemctl kill 报错但主进程已结束，按成功处理：%s", e)
+                    return
+                await asyncio.sleep(0.5)
+            raise
 
 
 class ObserveBackend:

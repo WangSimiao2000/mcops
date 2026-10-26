@@ -29,6 +29,9 @@ from mcops.supervisor import spawn_logged
 
 log = logging.getLogger(__name__)
 
+# watch_process 连续多少次（每次间隔 1 秒）查不到进程才判定崩溃
+CRASH_CONFIRM = 5
+
 
 class State(StrEnum):
     STOPPED = "stopped"
@@ -147,6 +150,20 @@ class ServerController:
         if self.observe:
             raise ConflictError("观测模式：服务器仍由旧脚本管理，面板不执行控制操作")
 
+    async def foreign_instance(self) -> str | None:
+        """自己的进程没在跑时，看有没有别的服务端占着这个目录 / 端口。
+
+        2026-10-25 18:32 主机重启：遗留的系统级 mc-server.service 先用 tmux 拉起了 MC，
+        mc-ops 再启动时撞上 session.lock，自己那个 JVM 启动失败却挂着不退，一整晚面板
+        以为服务端是自己的。所以启动前先查，有就拒绝并告警。
+        """
+        if await _port_open("127.0.0.1", self.cfg.port):
+            return f"端口 {self.cfg.port} 已有程序在监听"
+        lock = self.cfg.game_dir / _level_name(self.cfg.game_dir) / "session.lock"
+        if _file_locked(lock):
+            return f"存档锁 {lock.parent.name}/session.lock 被其他进程持有"
+        return None
+
     async def start(self) -> None:
         self.deny_if_observe()
         async with self._op_lock:
@@ -154,6 +171,10 @@ class ServerController:
                 raise ConflictError(f"当前状态为 {self.state}，不能启动")
             if await self.backend.pid() is not None:
                 raise ConflictError("检测到服务端进程已在运行")
+            foreign = await self.foreign_instance()
+            if foreign:
+                await self.bus.emit(Event("server_foreign_instance", "server", {"reason": foreign}))
+                raise ConflictError(f"mc-ops 之外已有服务端在运行（{foreign}），不启动")
             self._ready.clear()
             self.planned_by = None
             self._set_state(State.STARTING)
@@ -206,25 +227,56 @@ class ServerController:
         spawn_logged(self._do_stop(), "do_stop")
 
     async def _do_stop(self) -> None:
+        """无论哪一步出错，最后都按"进程还在不在"落到确定状态，绝不卡在 stopping。
+
+        2026-10-26 05:06：SIGKILL 已生效，但 systemctl kill 报错，异常直接冒出去，
+        状态一直是 stopping，定时重启等不到 stopped 就放弃，服务器停了 5 小时。
+        """
+        error: str | None = None
         try:
-            await self.rcon.command("stop")
-        except Exception as e:  # RCON 不可达也要能关：退回 SIGTERM（MC 会保存后退出）
-            log.warning("RCON stop 失败，改用 SIGTERM：%s", e)
+            try:
+                await self.rcon.command("stop")
+            except Exception as e:  # RCON 不可达也要能关：退回 SIGTERM（MC 会保存后退出）
+                log.warning("RCON stop 失败，改用 SIGTERM：%s", e)
+                with contextlib.suppress(Exception):
+                    await self.backend.terminate()
+            deadline = time.monotonic() + self.cfg.stop_timeout_s
+            while time.monotonic() < deadline:
+                if await self.backend.pid() is None:
+                    break
+                await asyncio.sleep(0.5)
+            else:
+                try:
+                    await self.backend.kill()
+                except Exception as e:
+                    error = f"强制结束失败：{e}"
+                    log.error("关服：%s", error)
+                await self.bus.emit(Event("server_killed", "server", {"reason": "stop 超时"}))
+        except Exception as e:
+            error = f"关服出错：{e}"
+            log.exception("关服出错")
+        finally:
             with contextlib.suppress(Exception):
-                await self.backend.terminate()
-        deadline = time.monotonic() + self.cfg.stop_timeout_s
-        while time.monotonic() < deadline:
-            if await self.backend.pid() is None:
-                break
-            await asyncio.sleep(0.5)
-        else:
-            await self.backend.kill()
-            await self.bus.emit(Event("server_killed", "server", {"reason": "stop 超时"}))
-        await self.rcon.close()
-        self.started_at = None
-        self._pid = None
-        self._set_state(State.STOPPED)
-        await self.bus.emit(Event("server_stopped", "server"))
+                await self.rcon.close()
+            alive = True
+            with contextlib.suppress(Exception):
+                for _ in range(10):
+                    if await self.backend.pid() is None:
+                        alive = False
+                        break
+                    await asyncio.sleep(0.5)
+            if alive:
+                # 进程还在：回到 running（RCON 照常可用），并告警，不假装已经关掉
+                log.error("关服失败，服务端进程仍在运行，已恢复为 running")
+                self._set_state(State.RUNNING)
+                await self.bus.emit(
+                    Event("server_stop_failed", "server", {"error": error or "进程仍在运行"})
+                )
+            else:
+                self.started_at = None
+                self._pid = None
+                self._set_state(State.STOPPED)
+                await self.bus.emit(Event("server_stopped", "server"))
 
     async def wait_state(self, *states: State, timeout: float = 300) -> State:
         deadline = time.monotonic() + timeout
@@ -261,20 +313,53 @@ class ServerController:
 
     # ---- 后台任务 ---------------------------------------------------------
 
-    async def watch_process(self, interval_s: float = 1.0) -> None:
-        """进程意外消失 → crashed（M1 的 watchdog 在此基础上做自愈与告警）。"""
+    async def watch_process(self, interval_s: float = 1.0, confirm: int = CRASH_CONFIRM) -> None:
+        """进程意外消失 → crashed（M1 的 watchdog 在此基础上做自愈与告警）。
+
+        - 连续 ``confirm`` 次查不到进程才判崩溃：systemd 后端靠 ``systemctl --user show``
+          取 PID，系统升级时 user manager 会 daemon-reexec，几秒内查询失败，不能当成崩溃
+          （2026-10-15 06:01 就这样把正在运行的服务器误判为崩溃）。
+        - 处于 crashed 却又查到了进程（误判、或自动重启撞上"进程已在运行"）→ 重新接管为
+          running，面板不会一直卡在"已崩溃"。
+        """
+        misses = 0
         while True:
             await asyncio.sleep(interval_s)
             if self.observe:
                 await self._observe_tick()
                 continue
-            if self.state is not State.RUNNING:
+            if self.state is State.CRASHED:
+                misses = 0
+                await self._readopt_if_alive()
                 continue
-            if await self.backend.pid() is None:
-                self.started_at = None
-                self._pid = None
-                self._set_state(State.CRASHED)
-                await self.bus.emit(Event("server_crashed", "server"))
+            if self.state is not State.RUNNING:
+                misses = 0
+                continue
+            if await self.backend.pid() is not None:
+                misses = 0
+                continue
+            misses += 1
+            if misses < confirm:
+                continue
+            misses = 0
+            self.started_at = None
+            self._pid = None
+            self._set_state(State.CRASHED)
+            await self.bus.emit(Event("server_crashed", "server"))
+
+    async def _readopt_if_alive(self) -> None:
+        async with self._op_lock:
+            if self.state is not State.CRASHED:
+                return
+            pid = await self.backend.pid()
+            if pid is None:
+                return
+            self._pid = pid
+            self.started_at = _proc_started_monotonic(pid)
+            self._ready.set()
+            self._set_state(State.RUNNING)
+        log.warning("crashed 状态下发现服务端进程 %s 仍在运行，已重新接管", pid)
+        await self.bus.emit(Event("server_adopted", "server", {"pid": pid, "reason": "recovered"}))
 
     async def _observe_tick(self) -> None:
         """观测模式：只跟随进程是否存在（旧脚本每天 05:00 计划重启，不能算崩溃）。"""
@@ -334,3 +419,46 @@ def _proc_started_monotonic(pid: int) -> float:
         return time.monotonic() - max(age, 0.0)
     except (OSError, ValueError, IndexError):
         return time.monotonic()
+
+
+async def _port_open(host: str, port: int, timeout: float = 0.5) -> bool:
+    try:
+        _, w = await asyncio.wait_for(asyncio.open_connection(host, port), timeout)
+    except (OSError, TimeoutError):
+        return False
+    w.close()
+    with contextlib.suppress(Exception):
+        await w.wait_closed()
+    return True
+
+
+def _level_name(game_dir: Path) -> str:
+    """server.properties 里的 level-name，读不到就是原版默认的 world。"""
+    with contextlib.suppress(OSError):
+        for line in (game_dir / "server.properties").read_text(encoding="utf-8").splitlines():
+            k, sep, v = line.partition("=")
+            if sep and k.strip() == "level-name" and v.strip():
+                return v.strip()
+    return "world"
+
+
+def _file_locked(path: Path) -> bool:
+    """session.lock 是否被别的进程用 fcntl 锁住（Java FileChannel.tryLock 在 Linux 上就是 fcntl 锁）。
+
+    试着加一下锁再立刻放开；文件不存在、打不开都当作没被锁。
+    """
+    import fcntl
+
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except OSError:
+        return False
+    try:
+        fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return True
+    else:
+        fcntl.lockf(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)

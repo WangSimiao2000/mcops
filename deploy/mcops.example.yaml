@@ -41,3 +41,30 @@ api:
 #   public_ports:                     # 只用于「网络」页展示 frps 对外开放了哪些端口
 #     - {port: 25565, proxy: minecraft, desc: Minecraft}
 #     - {port: 7000, proxy: frp, desc: frp 控制连接}
+
+# —— 可选：公开状态推送（给博客等公开页面用），仅此处 ——
+# 定时把脱敏的 status.json（在线状态 / 人数 / 版本 / 运行时长 / 24 小时曲线，不含玩家名和 IP）
+# 推到一个开了 GitHub Pages 的仓库。仓库只保留最新一次提交。
+# 1. mc-server 上：ssh-keygen -t ed25519 -N '' -C mcops-status -f ~/.config/mcops/status_ed25519
+# 2. GitHub 上：该仓库 Settings → Deploy keys → Add deploy key，粘贴 status_ed25519.pub，勾选 Allow write access
+# 3. 取消下面的注释并填写，然后 systemctl --user restart mcops-agent
+# status_publish:
+#   remote: git@github.com:<你的账号>/mc-status.git
+#   ssh_key: __HOME__/.config/mcops/status_ed25519
+#   interval_s: 600                   # GitHub Pages 每小时约 10 次构建上限，最短 360
+
+# —— 可选：每日等轴测地图（博客服务器页查看），仅此处 ——
+# 每天把主世界渲染成 2:1 像素等轴测瓦片，推到另一个开了 GitHub Pages 的仓库（只保留最新提交）。
+# 复制存档时只 save-off 几秒，不停服；渲染在低优先级子进程里跑。
+# 0. 依赖（numpy + pillow）已随安装包带上；源码运行时执行 uv sync --extra map
+# 1. mc-server 上：ssh-keygen -t ed25519 -N '' -C mcops-map -f ~/.config/mcops/map_ed25519
+# 2. GitHub 上：该仓库 Deploy keys 里添加 map_ed25519.pub 并勾选 Allow write access（部署密钥不能和 status 共用）
+# 3. 取消下面的注释并填写，然后 systemctl --user restart mcops-agent
+# map_publish:
+#   remote: git@github.com:<你的账号>/mc-map.git
+#   ssh_key: __HOME__/.config/mcops/map_ed25519
+#   # time: "06:30"                   # 留空 = 跟着每日定时重启：停服时复制存档、开服后渲染；填了就单独在这个时间生成
+#   hot_minutes: 60                   # 玩家累计待满多少分钟的区块出高清瓦片
+#   workers: 2                        # 渲染进程数，每个峰值约 500MB 内存
+#   announce: true                    # 有区域变化时让 QQ 机器人在群里播报
+#   public_url: https://blog.example.com/server/map/   # 面板里「打开公开地图」的链接

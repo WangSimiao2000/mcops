@@ -419,6 +419,50 @@ export interface JobsResponse {
   history: JobRun[];
 }
 
+/** 世界地图（mapgen）一次生成的记录 */
+export interface MapRun {
+  started_at: string;
+  finished_at: string;
+  seconds: number;
+  trigger: string;
+  ok: boolean;
+  error: string | null;
+  result: {
+    snapshot?: { regions: number; copied: number; removed: number };
+    render?: {
+      regions?: number;
+      rendered?: Record<string, number>;
+      tiles_written?: number;
+      levels?: number;
+      hot_tiles?: number;
+      tiles?: Record<string, number>;
+      bytes?: number;
+      seconds?: number;
+    };
+    version?: string;
+  } | null;
+}
+
+export interface MapStatus {
+  enabled: boolean;
+  mode?: 'restart' | 'time';
+  schedule?: string | null;
+  fallback_at?: string;
+  running?: boolean;
+  phase?: string | null;
+  started_at?: string | null;
+  next_run?: string | null;
+  pushed?: boolean;
+  last?: MapRun | null;
+  history?: MapRun[];
+  last_error?: string | null;
+  tiles?: { levels: number; generated_at: string | null; counts: Record<string, number> } | null;
+  public_url?: string | null;
+  has_preview?: boolean;
+  hot_minutes?: number;
+  announce?: boolean;
+}
+
 export interface JobRunAccepted {
   accepted: true;
 }

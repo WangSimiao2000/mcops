@@ -12,6 +12,8 @@ vi.mock('@/api', () => ({
     jobs: vi.fn(),
     runJob: vi.fn(),
     watchdogReset: vi.fn(),
+    mapStatus: vi.fn(async () => ({ enabled: false })),
+    runMap: vi.fn(),
   },
 }));
 import { api } from '@/api';

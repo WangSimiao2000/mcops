@@ -79,3 +79,55 @@ async def test_ops_restic_job_pauses_saves(env: Env, tmp_path: Path) -> None:  #
     assert env.rcon.commands.index(tells[0]) < env.rcon.commands.index(
         "save-off"
     )  # 先提醒再暂停保存
+
+
+async def test_forget_keeps_stopped_snapshots_separately(tmp_path: Path) -> None:
+    """停服快照不受主策略影响，单独只留最近 keep_stopped 个；普通快照照常按主策略清理。"""
+    g = make_game(tmp_path)
+    r = _restic(tmp_path, g)
+    r.policy = RetentionPolicy(1, 1, 0, 0, keep_stopped=2)
+    await r.ensure_repo()
+    stopped = [(await r.backup(tags=["stopped", "daily"]))["snapshot"] for _ in range(3)]
+    auto = [(await r.backup(tags=["auto"]))["snapshot"] for _ in range(2)]
+    removed = await r.forget(prune=True)
+    left = {s["id"] for s in await r.snapshots()}
+    assert removed == 2
+    assert left == {stopped[1], stopped[2], auto[1]}
+
+
+async def test_scheduled_restart_uses_stopped_snapshot(env: Env, tmp_path: Path) -> None:  # noqa: F811
+    """开了 restic：每日重启拍停服快照、不再打 tar，旧 tar 过期后全部清掉（不再保底留 min_keep 个）。"""
+    import asyncio
+    import os
+    import time
+
+    from mcops.server import State
+    from tests.test_ops import _running
+
+    env.ops.restic = _restic(tmp_path, env.ops.backup_cfg.game_dir)
+    bk = env.ops.backup_cfg.backup_dir
+    bk.mkdir(parents=True, exist_ok=True)
+    old = bk / "mc-backup-20200101_050000.tar.gz"
+    old.write_bytes(b"x")
+    t8 = time.time() - 8 * 86400
+    os.utime(old, (t8, t8))
+    await _running(env)
+
+    async def stopper() -> None:
+        while "stop" not in env.rcon.commands:
+            await asyncio.sleep(0.02)
+        env.backend.alive = False
+        while env.srv.state is not State.STARTING:
+            await asyncio.sleep(0.02)
+        env.srv._ready.set()
+
+    t = asyncio.create_task(stopper())
+    run_id = await env.ops.jobs.run("scheduled_restart", "test", env.ops.scheduled_restart)
+    await t
+    (h,) = [x for x in await env.ops.jobs.history() if x["id"] == run_id]
+    assert h["status"] == "ok", h["log"]
+    assert h["result"]["backup"].startswith("restic:")
+    assert h["result"]["removed"] == [old.name] and not any(bk.glob("mc-backup-*"))
+    (snap,) = await env.ops.restic.snapshots()
+    assert set(snap["tags"]) == {"stopped", "daily"}
+    assert env.srv.state is State.RUNNING

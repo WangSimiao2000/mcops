@@ -69,7 +69,7 @@ ADVANCED: set[str] = {
 
 APPLY_MC: set[str] = {
     "server.java_bin", "server.java_opts", "server.jar",
-    "ops.spawn", "ops.motd", "ops.motd.server_list", "ops.motd.line1", "ops.motd.line2",
+    "ops.spawn", "ops.spawn_yaw", "ops.motd", "ops.motd.server_list", "ops.motd.line1", "ops.motd.line2",
 }  # fmt: skip
 APPLY_LIVE: set[str] = {
     "security.night_start_hour", "security.night_end_hour", "security.ip_allowlist",
@@ -88,15 +88,16 @@ TITLES: dict[str, str] = {
     "ops.crash_threshold": "崩溃次数阈值", "ops.crash_window_minutes": "崩溃统计窗口",
     "ops.backup_dir": "冷备份目录", "ops.backup_keep_days": "冷备份保留天数",
     "ops.backup_min_keep": "冷备份最少保留", "ops.backup_exclude": "冷备份排除目录",
-    "ops.spawn": "开服后设置出生点", "ops.motd": "MOTD 同步", "ops.motd.server_list": "服务器列表 MOTD",
+    "ops.spawn": "开服后设置出生点", "ops.spawn_yaw": "出生朝向", "ops.motd": "MOTD 同步", "ops.motd.server_list": "服务器列表 MOTD",
     "ops.motd.line1": "MiniMOTD 第一行", "ops.motd.line2": "MiniMOTD 第二行",
     "ops.restic": "增量快照（restic）", "ops.restic.enabled": "启用增量快照",
     "ops.restic.binary": "restic 路径", "ops.restic.repo": "仓库位置",
     "ops.restic.interval_minutes": "快照间隔", "ops.restic.keep_hourly": "保留最近快照数",
     "ops.restic.keep_daily": "保留每日快照（天）", "ops.restic.keep_weekly": "保留每周快照（周）",
-    "ops.restic.keep_monthly": "保留每月快照（月）",
+    "ops.restic.keep_monthly": "保留每月快照（月）", "ops.restic.keep_stopped": "保留停服快照（个）",
     "ops.restic.offsite": "异地副本", "ops.restic.offsite.s3_repo": "对象存储地址（S3/COS）",
-    "ops.restic.offsite.smb_host": "NAS 地址（SMB）", "ops.restic.offsite.smb_share": "NAS 共享名",
+    "ops.restic.offsite.smb_host": "NAS 地址（SMB）", "ops.restic.offsite.smb_mac": "NAS 的 MAC 地址",
+    "ops.restic.offsite.smb_share": "NAS 共享名",
     "ops.restic.offsite.smb_path": "NAS 内子目录", "ops.restic.offsite.rclone_binary": "rclone 路径",
     "ops.restic.offsite.limit_upload_kib": "异地上传限速",
     "ops.flight_watch": "悬空/飞行检测", "ops.flight_interval_s": "检测间隔", "ops.flight_samples": "判定采样次数",
