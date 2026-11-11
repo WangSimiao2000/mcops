@@ -12,6 +12,7 @@ import type {
   ResticRepoId,
   RestoreScope,
   BotReplyResponse,
+  ResetPasswordResponse,
   BotStatus,
   CommandResponse,
   EdgeStatus,
@@ -223,6 +224,12 @@ export const api = {
   whitelistRemove(name: string): Promise<BotReplyResponse> {
     return apiFetch<BotReplyResponse>(`/whitelist/${encodeURIComponent(name)}`, {
       method: 'DELETE',
+    });
+  },
+
+  resetPassword(name: string): Promise<ResetPasswordResponse> {
+    return apiFetch<ResetPasswordResponse>(`/players/${encodeURIComponent(name)}/reset-password`, {
+      method: 'POST',
     });
   },
 

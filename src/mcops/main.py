@@ -277,6 +277,7 @@ def build_app(loaded: LoadedConfig, config_path: Path | None = None) -> FastAPI:
                 sp.branch,
                 sp.interval_s,
                 since=lambda: sp.since or detect_since(cfg.server.game_dir),
+                heartbeat_s=sp.heartbeat_s,
             )
             svc.status_publisher = pub
             sup.spawn("status_publish", pub.loop)

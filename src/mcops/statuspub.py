@@ -7,7 +7,9 @@
   不含玩家名、IP、服务器地址。
 - 仓库只保留最新一次提交（每次都是新的孤儿提交 + 强推），历史不会无限增长；曲线数据存在文件自己里。
 - 用一把只对该仓库有写权限的部署密钥（deploy key）推送，不需要 GitHub 账号令牌。
-- GitHub Pages 每小时约 10 次构建上限，默认 10 分钟一次。
+- 每 interval_s（默认 10 分钟）检查一次，曲线点照常记在本地文件里；只有公开字段（在线、状态、人数、
+  上限、版本、开服日期）变了才推送，没变化时每 heartbeat_s（默认 1 小时）保底推一次，让页面知道
+  小主机还活着。每次推送都会触发一次 Pages 部署，Pages 部署偶尔会卡十来分钟，推得太密会一次接一次被顶掉。
 """
 
 from __future__ import annotations
@@ -44,6 +46,7 @@ def build_payload(
     previous: dict[str, Any] | None,
     now: datetime | None = None,
     since: date | None = None,
+    heartbeat_s: float | None = None,
 ) -> dict[str, Any]:
     """由 ServerController.status_snapshot() 生成公开数据，并把本次人数接到历史曲线后面。"""
     now = now or datetime.now(UTC)
@@ -71,8 +74,18 @@ def build_payload(
         "uptime_s": status.get("uptime_s") if running else None,  # 本次连续运行
         "since": since.isoformat() if since else None,  # 开服日期，重启不清零
         "updated_at": stamp,
+        # 没变化时最久多少秒推一次：页面据此判断「失联」，不再假定 10 分钟一次
+        "heartbeat_s": int(heartbeat_s) if heartbeat_s else None,
         "history": history,
     }
+
+
+# 这些字段变了才值得推送；updated_at、uptime_s、曲线每次都在变，不算
+_CHANGE_KEYS = ("online", "state", "players_online", "players_max", "version", "since")
+
+
+def change_key(payload: dict[str, Any]) -> tuple[Any, ...]:
+    return tuple(payload.get(k) for k in _CHANGE_KEYS)
 
 
 class StatusPublisher:
@@ -86,6 +99,8 @@ class StatusPublisher:
         branch: str = "main",
         interval_s: float = 600.0,
         since: Callable[[], date | None] = lambda: None,
+        heartbeat_s: float = 3600.0,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         self.snapshot = snapshot
         self.since = since
@@ -95,8 +110,13 @@ class StatusPublisher:
         self.known_hosts = known_hosts
         self.branch = branch
         self.interval_s = interval_s
-        self.last_ok: float | None = None
+        self.heartbeat_s = max(heartbeat_s, interval_s)
+        self.clock = clock
+        self.last_ok: float | None = None  # 最近一次推送成功的时间
         self.last_error: str | None = None
+        self._pushed: tuple[Any, ...] | None = (
+            None  # 最近一次推送成功时的公开字段；进程重启后为空，先推一次
+        )
 
     def _env(self) -> dict[str, str]:
         # 独立的 known_hosts：首次连接记下 github.com 的主机密钥，之后变了就拒绝（不碰用户自己的 ~/.ssh）
@@ -141,9 +161,37 @@ class StatusPublisher:
         except (OSError, ValueError):
             return None
 
-    async def publish_once(self) -> dict[str, Any]:
+    def _due(self, payload: dict[str, Any]) -> bool:
+        if self._pushed is None or self.last_ok is None:
+            return True
+        if change_key(payload) != self._pushed:
+            return True
+        # 留一点余量：检查间隔有抖动，免得刚好差几秒拖到下一轮、变成 70 分钟一次
+        return self.clock() - self.last_ok >= self.heartbeat_s - 60
+
+    async def tick(self) -> tuple[dict[str, Any], bool]:
+        """检查一次：曲线点总是写进本地文件；公开字段变了或到了保底时间才推送。返回 (数据, 是否推送)。"""
         await self._ensure_repo()
-        payload = build_payload(self.snapshot(), self._read_previous(), since=self.since())
+        payload = build_payload(
+            self.snapshot(), self._read_previous(), since=self.since(), heartbeat_s=self.heartbeat_s
+        )
+        due = self._due(payload)
+        self._write(payload)
+        if due:
+            await self._push(payload)
+        return payload, due
+
+    async def publish_once(self) -> dict[str, Any]:
+        """不管有没有变化，立即推送一次。"""
+        await self._ensure_repo()
+        payload = build_payload(
+            self.snapshot(), self._read_previous(), since=self.since(), heartbeat_s=self.heartbeat_s
+        )
+        self._write(payload)
+        await self._push(payload)
+        return payload
+
+    def _write(self, payload: dict[str, Any]) -> None:
         (self.repo_dir / "status.json").write_text(
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )
@@ -154,6 +202,8 @@ class StatusPublisher:
                 "# mc-status\n\n由 mc-ops 自动生成的公开服务器状态，只保留最新一次提交。\n",
                 encoding="utf-8",
             )
+
+    async def _push(self, payload: dict[str, Any]) -> None:
         # 孤儿提交 + 强推：远端始终只有一个提交
         await self._git("checkout", "-q", "--orphan", "publish")
         await self._git("add", "-A")
@@ -161,16 +211,21 @@ class StatusPublisher:
         await self._git("branch", "-q", "-D", self.branch, check=False)
         await self._git("branch", "-q", "-m", self.branch)
         await self._git("push", "-q", "--force", "origin", f"{self.branch}:{self.branch}")
-        self.last_ok = time.time()
+        self.last_ok = self.clock()
         self.last_error = None
-        return payload
+        self._pushed = change_key(payload)
 
     async def loop(self) -> None:
         await asyncio.sleep(30)  # 等接管 / 首次状态轮询完成
         while True:
             try:
-                p = await self.publish_once()
-                log.info("公开状态已推送：online=%s players=%s", p["online"], p["players_online"])
+                p, pushed = await self.tick()
+                if pushed:
+                    log.info(
+                        "公开状态已推送：online=%s players=%s", p["online"], p["players_online"]
+                    )
+                else:
+                    log.debug("公开状态无变化，跳过推送")
             except Exception as e:  # 推送失败不影响其他功能，下一轮再试
                 self.last_error = str(e)
                 log.warning("公开状态推送失败：%s", e)

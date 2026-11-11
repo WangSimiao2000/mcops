@@ -94,7 +94,9 @@ class StatusPublishConfig(_Strict):
     """只对该仓库有写权限的部署密钥（私钥路径）。"""
     branch: str = Field(default="main", pattern=r"^[A-Za-z0-9._/-]{1,100}$")
     interval_s: float = Field(default=600.0, ge=360, le=86400)
-    """GitHub Pages 每小时约 10 次构建上限，最快 6 分钟一次。"""
+    """多久检查一次状态（曲线也按这个间隔记点）；公开字段变了才推送。最短 6 分钟。"""
+    heartbeat_s: float = Field(default=3600.0, ge=600, le=86400)
+    """没有变化时最久多久推一次，让页面知道小主机还在线。每次推送都会触发一次 Pages 部署。"""
     since: date | None = None
     """开服日期（公开的「已运行」从这天算起）；留空则取游戏目录 logs/ 里最早的日志日期。"""
 
