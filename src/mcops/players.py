@@ -236,6 +236,26 @@ class ServerFiles:
                 continue
         return out
 
+    def easyauth_password_hash(self, name: str) -> str | None:
+        """某个玩家当前存的密码哈希；没注册返回 None。读不到数据库时抛 LookupError。"""
+        if self.easyauth_db is None or not self.easyauth_db.exists():
+            raise LookupError("easyauth_db_unavailable")
+        try:
+            uri = f"file:{self.easyauth_db}?mode=ro"
+            with sqlite3.connect(uri, uri=True) as c:
+                row = c.execute(
+                    "select data from easyauth where username_lower = ?", (name.lower(),)
+                ).fetchone()
+        except sqlite3.Error as e:
+            raise LookupError(str(e)) from e
+        if row is None:
+            return None
+        try:
+            pw = json.loads(row[0]).get("password")
+        except (TypeError, json.JSONDecodeError):
+            return None
+        return str(pw) if pw else None
+
 
 async def list_players(
     engine: AsyncEngine, files: ServerFiles, q: str | None = None, limit: int = 200

@@ -340,6 +340,14 @@ export interface BotReplyResponse {
   reply: string;
 }
 
+/** 重置 EasyAuth 密码：password 只在这次响应里出现一次。 */
+export interface ResetPasswordResponse {
+  name: string;
+  password: string;
+  /** update = 改了已有账号的密码；register = 账号没注册过，替玩家注册 */
+  mode: 'update' | 'register';
+}
+
 export interface SimulateResponse {
   cmd: string;
   reply: string;

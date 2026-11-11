@@ -51,7 +51,8 @@ api:
 # status_publish:
 #   remote: git@github.com:<你的账号>/mc-status.git
 #   ssh_key: __HOME__/.config/mcops/status_ed25519
-#   interval_s: 600                   # GitHub Pages 每小时约 10 次构建上限，最短 360
+#   interval_s: 600                   # 多久检查一次（曲线也按这个记点），最短 360；状态变了才推送
+#   heartbeat_s: 3600                 # 没变化时最久多久推一次（每次推送触发一次 Pages 部署）
 
 # —— 可选：每日等轴测地图（博客服务器页查看），仅此处 ——
 # 每天把主世界渲染成 2:1 像素等轴测瓦片，推到另一个开了 GitHub Pages 的仓库（只保留最新提交）。

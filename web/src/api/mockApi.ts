@@ -46,6 +46,7 @@ import type {
   ResticInfo,
   ResticRepoId,
   BotReplyResponse,
+  ResetPasswordResponse,
   BotStatus,
   CommandResponse,
   EdgeStatus,
@@ -820,6 +821,15 @@ export const mockApi = {
         : []);
     const events = events_for(name);
     return { player, sessions, ips, events };
+  },
+
+  async resetPassword(name: string): Promise<ResetPasswordResponse> {
+    await delay(200);
+    const player = mockPlayers.find((p) => p.name === name);
+    if (!player) throw new ApiError(404, '玩家不存在');
+    const mode = player.easyauth_registered === false ? 'register' : 'update';
+    player.easyauth_registered = true;
+    return { name, password: 'k7mq3xwp2a', mode };
   },
 
   async sessions(params?: { limit?: number; online?: boolean }): Promise<SessionsResponse> {

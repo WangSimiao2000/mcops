@@ -7,6 +7,7 @@ import contextlib
 import ipaddress
 import logging
 import re
+import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -180,6 +181,14 @@ class WhitelistAddBody(BaseModel):
 
 class CommandBody(BaseModel):
     command: str = Field(min_length=1, max_length=1000)
+
+
+# 临时密码：去掉 0/O、1/l/I 这类容易抄错的字符，10 位约 49 bit
+_PW_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
+
+
+def temp_password(length: int = 10) -> str:
+    return "".join(secrets.choice(_PW_ALPHABET) for _ in range(length))
 
 
 def create_app(services_factory: Callable[[], Awaitable[Services]] | None = None) -> FastAPI:
@@ -379,6 +388,40 @@ def create_app(services_factory: Callable[[], Awaitable[Services]] | None = None
         sessions, ips = await pl.player_detail(s.engine, name)
         evs = [e.to_json() for e in await s.bus.recent_for_name(name, 100)]
         return {"player": found[0], "sessions": sessions, "ips": ips, "events": evs}
+
+    @app.post("/api/players/{name}/reset-password")
+    async def reset_password(name: str, sess: SessionDep, s: SvcDep) -> dict[str, str]:
+        """给玩家设一个随机临时密码（EasyAuth）。没注册过的账号直接替他注册，堵住抢注空档。
+
+        EasyAuth 的命令回复是异步发出的，RCON 收不到，所以改前改后各读一次 EasyAuth 数据库，
+        以密码哈希确实变了为准。临时密码只在这次响应里返回一次：不写审计日志、不写应用日志。
+        """
+        _check_name(name)
+        files = _files(s)
+        try:
+            before = files.easyauth_password_hash(name)
+        except LookupError:
+            raise HTTPException(503, "读不到 EasyAuth 数据库，无法确认结果，没有修改") from None
+        mode = "register" if before is None else "update"
+        pw = temp_password()
+        try:
+            await s.server.command(f"auth {mode} {name} {pw}")
+        except ConflictError as e:
+            raise HTTPException(409, str(e)) from None
+        after = before
+        for _ in range(20):  # EasyAuth 在后台线程算哈希、写库，通常 1 秒内完成
+            await asyncio.sleep(0.25)
+            with contextlib.suppress(LookupError):
+                after = files.easyauth_password_hash(name)
+            if after and after != before:
+                break
+        if not after or after == before:
+            await s.audit(
+                sess.user, "player.reset_password", target=name, result="failed", mode=mode
+            )
+            raise HTTPException(502, "EasyAuth 没有确认修改（5 秒内密码没变），请到控制台查看日志")
+        await s.audit(sess.user, "player.reset_password", target=name, mode=mode)
+        return {"name": name, "password": pw, "mode": mode}
 
     @app.get("/api/sessions")
     async def sessions(

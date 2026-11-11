@@ -7,7 +7,9 @@ from pathlib import Path
 
 import httpx
 import pytest
+from sqlalchemy import select
 
+from mcops import db
 from mcops.api import Services, create_app
 from mcops.auth import Authenticator, hash_password
 from mcops.backend import ObserveBackend
@@ -188,3 +190,74 @@ async def test_bot_and_whitelist_endpoints(
     assert (await c.delete("/api/whitelist/NewGuy_1")).json()["reply"].startswith("🗑")
     inter = (await c.get("/api/bot/interactions?q=NewGuy")).json()["items"]
     assert inter and inter[0]["cmd"] == "apply"
+
+
+async def test_reset_password(
+    ctx: tuple[httpx.AsyncClient, Services, Pipeline],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import sqlite3
+
+    c, svc, _ = ctx
+    assert svc.files is not None
+    # 没有 EasyAuth 数据库：拒绝修改（无法确认结果）
+    assert (await c.post("/api/players/Alice/reset-password")).status_code == 503
+
+    dbp = tmp_path / "easyauth.db"
+    with sqlite3.connect(dbp) as conn:
+        conn.execute("create table easyauth (username_lower text primary key, data text)")
+        conn.execute(
+            "insert into easyauth values ('alice', ?)", (json.dumps({"password": "old-hash"}),)
+        )
+    svc.files.easyauth_db = dbp
+    sent: list[str] = []
+
+    async def fake_command(cmd: str) -> str:
+        # 像 EasyAuth 一样：RCON 拿不到回复，结果直接写库
+        sent.append(cmd)
+        _, _op, name, pw = cmd.split()
+        with sqlite3.connect(dbp) as conn:
+            conn.execute(
+                "insert or replace into easyauth values (?, ?)",
+                (name.lower(), json.dumps({"password": f"hash({pw})"})),
+            )
+        return ""
+
+    monkeypatch.setattr(svc.server, "command", fake_command)
+
+    # 已注册：改密码
+    r = await c.post("/api/players/Alice/reset-password")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["mode"] == "update" and len(body["password"]) == 10
+    assert sent == [f"auth update Alice {body['password']}"]
+
+    # 没注册：替他注册
+    sent.clear()
+    r = (await c.post("/api/players/NewGuy_1/reset-password")).json()
+    assert r["mode"] == "register"
+    assert sent == [f"auth register NewGuy_1 {r['password']}"]
+
+    # 两次生成的密码不同；密码不进审计日志
+    assert r["password"] != body["password"]
+    async with svc.engine.connect() as aconn:
+        rows = (await aconn.execute(select(db.audit_log))).all()
+    text = repr(rows)
+    assert "player.reset_password" in text
+    assert body["password"] not in text and r["password"] not in text
+
+    # 名字非法、EasyAuth 没确认都要报错
+    assert (await c.post("/api/players/bad%20name/reset-password")).status_code == 400
+
+    async def broken(cmd: str) -> str:
+        return ""  # 命令发了，但数据库里的密码没变
+
+    monkeypatch.setattr(svc.server, "command", broken)
+    monkeypatch.setattr("mcops.api.asyncio.sleep", _no_sleep)
+    r2 = await c.post("/api/players/Alice/reset-password")
+    assert r2.status_code == 502 and "没有确认" in r2.json()["detail"]
+
+
+async def _no_sleep(_: float) -> None:
+    return None
